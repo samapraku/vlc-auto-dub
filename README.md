@@ -297,6 +297,8 @@ are sent.
 - **Original voices** (Off / 15% / 30% / 50%) and **Dub volume**: run
   `--original-volume` / `--dub-volume`. Preselect your usual levels with
   `original_volume` / `dub_volume` in the config below.
+- **A voice for each speaker** (off by default): runs `--speaker-voices`.
+  Preselect it with `speaker_voices = true` in the config.
 - **Add tracks into this file** (on by default for MP4/M4V/MOV/MKV): runs
   `--in-place`. Untick it to write a dubbed copy, `<base>_dubbed<ext>`, instead
   (with `--no-srt`: the subtitles are inside it); **Reopen video** then plays

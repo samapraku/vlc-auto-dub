@@ -14,6 +14,7 @@
 --       script = "/opt/vlc-auto-dub/main.py",  -- absolute path to main.py
 --       original_volume = 0.3,  -- optional: preselect "original voices under the dub"
 --       dub_volume = 1.0,       -- optional: preselect the dub volume
+--       speaker_voices = true,  -- optional: preselect "A voice for each speaker"
 --     }
 --
 -- or set VLC_AUTODUB_PYTHON / VLC_AUTODUB_SCRIPT (and optionally
@@ -22,7 +23,7 @@
 function descriptor()
     return {
         title = "Auto-Dub (vlc-auto-dub)",
-        version = "3.3",
+        version = "3.4",
         author = "vlc-auto-dub",
         shortdesc = "Dub and/or subtitle the current video",
         capabilities = { "menu" }
@@ -111,7 +112,7 @@ end
 -- Build the CLI argument list (everything after "<python> <script>").
 -- Mirrored by tests/test_vlc_invocation.py; keep the two in sync.
 function build_args(video, source, target, mode, in_place, sound_tags, use_embedded,
-                    dub_volume, original_volume)
+                    dub_volume, original_volume, speaker_voices)
     local args = { video }
     if in_place then
         table.insert(args, "--in-place")
@@ -151,6 +152,9 @@ function build_args(video, source, target, mode, in_place, sound_tags, use_embed
         if original_volume and original_volume > 0 then
             table.insert(args, "--original-volume")
             table.insert(args, gain_arg(original_volume))
+        end
+        if speaker_voices then
+            table.insert(args, "--speaker-voices")
         end
     end
     return args
@@ -348,7 +352,7 @@ local function show_status_dialog(message)
 end
 
 local function start_job(video, uri, python, script, source, target, mode, in_place, sound_tags,
-                         use_embedded, dub_volume, original_volume)
+                         use_embedded, dub_volume, original_volume, speaker_voices)
     local j = job_for(video, uri, in_place, mode)
     if running_pid(j) then
         job = j
@@ -357,7 +361,8 @@ local function start_job(video, uri, python, script, source, target, mode, in_pl
     end
     local parts = { shquote(python), shquote(script) }
     for _, arg in ipairs(build_args(video, source, target, mode, in_place, sound_tags,
-                                    use_embedded, dub_volume, original_volume)) do
+                                    use_embedded, dub_volume, original_volume,
+                                    speaker_voices)) do
         table.insert(parts, shquote(arg))
     end
     -- Run in the background so VLC's UI thread is not blocked. The PID is kept
@@ -446,6 +451,8 @@ local function show_settings_dialog(video, uri, python, script, cfg)
         1, next_row(), 2, 1)
     local embedded_cb = dlg:add_check_box("Use the video's subtitles (faster)", true,
         1, next_row(), 2, 1)
+    local speakers_cb = dlg:add_check_box("A voice for each speaker", cfg.speaker_voices == true,
+        1, next_row(), 2, 1)
 
     local r = next_row()
     dlg:add_button("Start", function()
@@ -456,7 +463,8 @@ local function show_settings_dialog(video, uri, python, script, cfg)
         local original_volume = (originals[original_dd:get_value()] or originals[1])[1]
         local dub_volume = (dubs[dub_dd:get_value()] or dubs[1])[1]
         start_job(video, uri, python, script, source, target, mode, in_place,
-            tags_cb:get_checked(), embedded_cb:get_checked(), dub_volume, original_volume)
+            tags_cb:get_checked(), embedded_cb:get_checked(), dub_volume, original_volume,
+            speakers_cb:get_checked())
     end, 1, r, 1, 1)
     dlg:add_button("Cancel", close_dialog, 2, r, 1, 1)
     dlg:show()

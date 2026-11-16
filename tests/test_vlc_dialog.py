@@ -146,6 +146,13 @@ def test_start_runs_the_cli_with_dialog_defaults(tmp_path):
     assert f"'{tmp_path}/my clip.mp4' '--in-place' '--target-lang' 'en' " \
            "'--use-embedded-subs' &" in command
     assert "--original-volume" not in command and "--dub-volume" not in command
+    assert "--speaker-voices" not in command
+
+
+def test_config_preselects_a_voice_for_each_speaker(tmp_path):
+    widgets, _v, command = run_dialog(tmp_path, "my clip.mp4", "speaker_voices = true")
+    assert "A voice for each speaker" in [w["text"] for w in widgets if w["kind"] == "check"]
+    assert "'--use-embedded-subs' '--speaker-voices' &" in command
 
 
 def test_config_preselects_volumes(tmp_path):
