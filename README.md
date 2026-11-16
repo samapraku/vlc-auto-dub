@@ -183,35 +183,43 @@ softer, `1.5` louder).
 
 With one voice for everyone, a conversation is hard to follow. With
 `--speaker-voices` the speakers are told apart and each one gets a voice of
-their own:
+their own, female or male to match:
 
-1. Every line of a second or more gets a voiceprint from the original audio
-   (Microsoft's [WavLM speaker model](https://huggingface.co/microsoft/wavlm-base-plus-sv),
-   ~400 MB one-time download, licence CC-BY-SA 3.0). Lines with close
-   voiceprints are grouped into speakers; groups of one or two lines join the
-   nearest speaker, and shorter lines are matched afterwards. At most 8.
-2. A speaker is called male or female only when the AudioSet classifier used
-   for sound tags is clear about it over all their lines together. Otherwise
-   the gender is left unknown.
-3. The speaker with the most dialogue picks first. Each takes an unused voice of
-   their gender; speakers of unknown gender alternate between male and female
-   voices. No two speakers share a voice until the pool runs out.
+1. **Turns**: a line that doesn't end a sentence and is followed within a
+   second by the next is the same person carrying on, so the whole turn gets
+   one voice.
+2. **Gender**: each turn is scored by a model trained for it
+   ([audeering/wav2vec2-large-robust-6-ft-age-gender](https://huggingface.co/audeering/wav2vec2-large-robust-6-ft-age-gender),
+   363 MB, **CC-BY-NC-SA 4.0, non-commercial use**). Turns it is sure about
+   are split into women and men before grouping, so one speaker can't mix both.
+3. **Voiceprints**: within each gender, turns are grouped by
+   [3D-Speaker CAM++](https://modelscope.cn/models/iic/speech_campplus_sv_zh_en_16k-common_advanced)
+   voiceprints (28 MB, Apache-2.0, run with `sherpa-onnx`). Groups of fewer
+   than 5 turns join the nearest larger one; turns of unclear gender and short
+   ones join the nearest speaker. At most 6 speakers per gender.
+4. **Voices**: the speaker with the most dialogue picks first; each takes an
+   unused voice of their gender.
 
-English uses the 18-speaker CMU ARCTIC piper model (one ~77 MB download, 6 male
-and 6 female voices used). German, French, Spanish, Italian and Russian have
+English uses the 18-speaker CMU ARCTIC piper model (one ~77 MB download, 6
+female and 6 male voices). German, French, Spanish, Italian and Russian have
 2–4 voices each; Turkish and Portuguese only have male piper voices, so women
 get one of those (a warning says so). The run prints each speaker with their
 line count, talk time and voice.
 
+On two episodes of a Korean TV drama (about 1,000 subtitle lines each) it
+found the same cast both times: the female lead, two main men and a few
+minor characters, and both halves of a long turn got the same voice 85–92% of
+the time. The speaker step took about 2 minutes per hour-long episode on an
+M-series Mac.
+
 - Off by default. Also `speaker_voices = true` in the config file, or
   `AUTODUB_SPEAKER_VOICES=1`.
 - An explicit `--voice` wins: every speaker uses it.
-- How well it works depends on the audio. On clean dialogue speakers separate
-  well; shouting, people talking over each other and phone recordings split
-  one person into several speakers or merge two, and make gender unclear.
-- Cost: two models run over the dialogue. On an M-series Mac a 4-minute clip
-  with 77 lines took 16 s extra (CPU), so expect several minutes for a feature
-  film.
+- Models download once: the voiceprint model into
+  `~/.cache/vlc-auto-dub/speaker` (`AUTODUB_SPEAKER_DIR`), the gender model
+  into the Hugging Face cache. Later runs load both from disk without network.
+- Best on film and TV audio. Shouting, people talking over each other and
+  phone recordings still confuse it (a shouting man can read as a woman).
 
 ### Recognition, timing and sound tags
 

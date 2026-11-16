@@ -136,10 +136,10 @@ def _speaker_voices(audio: str, segments: list, config: Config, voice: str | Non
     from .speakers import assign_voices, label_speakers
 
     progress("telling the speakers apart")
-    ids, speakers = label_speakers(media.read_samples(audio), [(s, e) for s, e, _ in segments])
+    ids, speakers = label_speakers(media.read_samples(audio), list(segments))
     voices = assign_voices(speakers, pool, voice)
     summary["speakers"] = [
-        {"id": s.id, "gender": s.gender, "gender_score": s.gender_score, "lines": s.lines,
+        {"id": s.id, "gender": s.gender, "female": s.female, "lines": s.lines,
          "seconds": s.seconds, "voice": voices[s.id]} for s in speakers]
     progress(f"found {len(speakers)} speaker{'s' if len(speakers) != 1 else ''}: " + ", ".join(
         f"{s.gender} -> {voices[s.id]}" for s in speakers))

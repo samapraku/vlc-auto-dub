@@ -16,6 +16,9 @@ transformers>=4.40
 # TTS (local, CPU) -- default provider "piper"
 piper-tts>=1.8
 
+# A voice for each speaker (--speaker-voices): speaker voiceprints
+sherpa-onnx>=1.12
+
 # CA bundle for model downloads on Pythons without one (python.org macOS builds)
 certifi
 

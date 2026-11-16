@@ -35,16 +35,16 @@ def axis(i: int, dim: int = 16) -> np.ndarray:
 # --- cluster ---------------------------------------------------------------
 
 def test_cluster_finds_each_speaker():
-    e = np.vstack([voices_around(axis(0), 6), voices_around(axis(1), 4),
+    e = np.vstack([voices_around(axis(0), 6), voices_around(axis(1), 5),
                    voices_around(axis(2), 5)])
     labels = cluster(e)
     assert len(set(labels)) == 3
-    assert len(set(labels[:6])) == len(set(labels[6:10])) == len(set(labels[10:])) == 1
+    assert len(set(labels[:6])) == len(set(labels[6:11])) == len(set(labels[11:])) == 1
 
 
 def test_fragments_join_the_nearest_real_speaker():
     a, b = axis(0), axis(1)
-    near_b = 0.6 * a + b                     # its own group at 0.2, but nearer b
+    near_b = axis(2) + 0.2 * b               # its own group at 0.8, but nearer b than a
     e = np.vstack([voices_around(a, 5), voices_around(b, 5), voices_around(near_b, 2, 0.01)])
     labels = cluster(e)
     assert len(set(labels)) == 2
@@ -52,9 +52,9 @@ def test_fragments_join_the_nearest_real_speaker():
 
 
 def test_cluster_caps_the_speaker_count():
-    e = np.vstack([voices_around(axis(i), 3) for i in range(6)])
+    e = np.vstack([voices_around(axis(i), 5) for i in range(7)])
     assert len(set(cluster(e, max_speakers=4))) == 4
-    assert len(set(cluster(e))) == 6
+    assert len(set(cluster(e))) == speakers.MAX_PER_GENDER
 
 
 def test_cluster_edge_cases():
@@ -64,15 +64,26 @@ def test_cluster_edge_cases():
     assert len(set(cluster(np.vstack([axis(0), axis(1)])))) == 2
 
 
+# --- speaking turns --------------------------------------------------------
+
+def test_a_sentence_carried_across_lines_is_one_turn():
+    lines = [(0, 1, "We got dressed to the nines"), (1.1, 2, "since it was a big day."),
+             (2.2, 3, "\u200eYou could've put this cap on,"), (3.1, 4, "\u200ethen let her try it."),
+             (4.1, 5, "Really?"), (5.1, 6, "Yes"), (8, 9, "and that's it."),
+             (9.1, 10, "-Go ahead."), (10.1, 11, "-Yes")]
+    assert speakers.turns(lines) == [[0, 1], [2, 3], [4], [5], [6], [7], [8]]
+    assert speakers.turns([]) == []
+
+
 # --- gender and voice sharing ----------------------------------------------
 
 def test_gender_needs_a_clear_margin():
-    assert gender_of(1.5) == "male" and gender_of(-0.9) == "female"
-    assert gender_of(0.3) == gender_of(-0.5) == gender_of(None) == "unknown"
+    assert gender_of(0.9) == "female" and gender_of(0.1) == "male"
+    assert gender_of(0.5) == gender_of(0.69) == gender_of(None) == "unknown"
 
 
 def spk(i: int, gender: str) -> Speaker:
-    return Speaker(id=i, gender=gender, gender_score=None, lines=1, seconds=1.0)
+    return Speaker(id=i, gender=gender, female=None, lines=1, seconds=1.0)
 
 
 POOL = {"male": ["m1", "m2"], "female": ["f1", "f2"]}
@@ -102,13 +113,9 @@ def test_a_missing_gender_borrows_and_a_full_pool_reuses():
 
 class FakeEmbedder:
     """Voiceprint from the clip's level: each fake speaker talks at its own level."""
-    LEVELS = {0.1: axis(0), 0.2: axis(1), 0.3: axis(2)}
-
-    def __init__(self):
-        self.calls = 0
+    LEVELS = {0.1: axis(0), 0.2: axis(1), 0.3: axis(2), 0.4: axis(3)}
 
     def embed(self, clips):
-        self.calls += 1
         out = []
         for c in clips:
             level = min(self.LEVELS, key=lambda lv: abs(lv - float(np.mean(c))))
@@ -117,47 +124,71 @@ class FakeEmbedder:
 
 
 class FakeScorer:
-    """0.1 is a man, 0.2 a woman, 0.3 unclear."""
-    def score(self, clips):
-        return [{0.1: 2.0, 0.2: -2.0}.get(round(float(np.mean(c)), 1), 0.0) for c in clips]
+    """0.1 and 0.4 are men, 0.2 a woman, 0.3 unclear."""
+    def female(self, clips):
+        return [{0.1: 0.0, 0.4: 0.05, 0.2: 1.0}.get(round(float(np.mean(c)), 1), 0.5)
+                for c in clips]
 
 
 def timeline(lines):
-    """Samples where each (start, end, level) line is a constant ``level``."""
+    """Samples where each (start, end, level[, text]) line is a constant ``level``."""
     rate = speakers.SAMPLE_RATE
-    total = max(e for _, e, _ in lines) + 1
+    total = max(line[1] for line in lines) + 1
     x = np.zeros(int(total * rate), dtype=np.float32)
-    for s, e, level in lines:
-        x[int(s * rate):int(e * rate)] = level
-    return x, [(s, e) for s, e, _ in lines]
+    for line in lines:
+        x[int(line[0] * rate):int(line[1] * rate)] = line[2]
+    return x, [(line[0], line[1], line[3] if len(line) > 3 else "Line.") for line in lines]
+
+
+def label(lines):
+    x, segs = timeline(lines)
+    return label_speakers(x, segs, FakeEmbedder(), FakeScorer())
 
 
 def test_label_speakers_orders_by_talk_time_and_names_genders():
-    lines = [(0, 2, 0.2), (3, 5, 0.1), (6, 9, 0.1), (10, 12, 0.2), (13, 15, 0.1),
-             (16, 18, 0.2), (19, 20.5, 0.1), (21, 23, 0.3), (24, 26, 0.3), (27, 28.5, 0.3)]
-    x, segs = timeline(lines)
-    ids, found = label_speakers(x, segs, FakeEmbedder(), FakeScorer())
-    # 0.1 talks 8.5 s, 0.2 6 s, 0.3 5.5 s.
-    assert [s.gender for s in found] == ["male", "female", "unknown"]
-    assert [s.lines for s in found] == [4, 3, 3]
-    assert ids == [1, 0, 0, 1, 0, 1, 0, 2, 2, 2]
+    ids, found = label([(0, 2, 0.2), (3, 5, 0.1), (6, 9, 0.1), (10, 12, 0.2), (13, 15, 0.1),
+                        (16, 18, 0.2), (19, 20.5, 0.1)])
+    # 0.1 talks 8.5 s, 0.2 6 s.
+    assert [(s.gender, s.lines, s.female) for s in found] == [("male", 4, 0.0),
+                                                             ("female", 3, 1.0)]
+    assert ids == [1, 0, 0, 1, 0, 1, 0]
 
 
-def test_short_lines_join_a_speaker():
-    lines = [(0, 2, 0.1), (3, 5, 0.1), (6, 8, 0.1), (9, 11, 0.2), (12, 14, 0.2),
-             (15, 17, 0.2), (18, 18.5, 0.2), (19, 19.1, 0.1)]
+def test_men_and_women_are_never_grouped_together():
+    # 0.1 and 0.4 are both men; a woman with a voiceprint like 0.1's stays apart.
+    class LookAlike(FakeEmbedder):
+        LEVELS = {0.1: axis(0), 0.2: axis(0), 0.4: axis(1)}
+    lines = [(i * 3, i * 3 + 2, lv) for i, lv in enumerate([0.1, 0.2, 0.4] * 5)]
     x, segs = timeline(lines)
-    ids, found = label_speakers(x, segs, FakeEmbedder(), FakeScorer())
+    ids, found = label_speakers(x, segs, LookAlike(), FakeScorer())
+    assert sorted(s.gender for s in found) == ["female", "male", "male"]
+    assert len({ids[i] for i in range(1, 15, 3)}) == 1                     # the woman
+    assert {ids[i] for i in range(1, 15, 3)}.isdisjoint(ids[i] for i in range(0, 15, 3))
+
+
+def test_unsure_turns_join_an_existing_speaker():
+    ids, found = label([(i * 3, i * 3 + 2, 0.1) for i in range(5)] + [(15, 17, 0.3)])
+    assert len(found) == 1 and ids == [0] * 6 and found[0].gender == "male"
+
+
+def test_a_turn_keeps_one_voice_even_when_the_voiceprints_differ():
+    ids, _found = label([(0, 2, 0.1), (3, 5, 0.1), (6, 8, 0.2), (9, 11, 0.2),
+                         (12, 14, 0.1, "I was going to"), (14.3, 16, 0.2, "say that.")])
+    assert ids[4] == ids[5]
+
+
+def test_short_turns_join_a_speaker():
+    ids, found = label([(0, 2, 0.1), (3, 5, 0.1), (6, 8, 0.1), (9, 11, 0.2), (12, 14, 0.2),
+                        (15, 17, 0.2), (18, 18.6, 0.2), (19, 19.2, 0.1)])
     assert len(found) == 2
-    assert ids[6] == ids[3]              # 0.5 s: matched by its own voiceprint
-    assert ids[7] == ids[6]              # 0.1 s: too short, same as the line before
+    assert ids[6] == ids[3]              # 0.6 s: matched by its own voiceprint
+    assert ids[7] == ids[6]              # 0.2 s: too short, same as the turn before
 
 
 def test_label_speakers_with_only_short_lines_or_none():
-    x, segs = timeline([(0, 0.5, 0.1), (1, 1.5, 0.2)])
-    ids, found = label_speakers(x, segs, FakeEmbedder(), FakeScorer())
+    ids, found = label([(0, 0.3, 0.1), (1, 1.3, 0.2)])
     assert ids == [0, 0] and len(found) == 1 and found[0].gender == "unknown"
-    assert label_speakers(x, [], FakeEmbedder(), FakeScorer()) == ([], [])
+    assert label_speakers(np.zeros(10), [], FakeEmbedder(), FakeScorer()) == ([], [])
 
 
 # --- voice pools -----------------------------------------------------------
