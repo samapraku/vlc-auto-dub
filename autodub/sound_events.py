@@ -151,21 +151,18 @@ class SoundTagger:
                     "sound tags need 'transformers' and 'torch' "
                     "(pip install -r requirements.txt), or pass --no-sound-tags"
                 ) from exc
-            import os
             import warnings
 
             import torch
-            from transformers.utils import logging as hf_logging
 
-            # keep the job log readable: no download bars or mel-filter warnings
-            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-            hf_logging.set_verbosity_error()
-            hf_logging.disable_progress_bar()
+            from .hf import from_pretrained
+
+            # keep the job log readable: no mel-filter warnings
             warnings.filterwarnings("ignore", message="At least one mel filter")
             self._device = "mps" if torch.backends.mps.is_available() else "cpu"
             try:
-                self._extractor = ASTFeatureExtractor.from_pretrained(MODEL_ID)
-                self._model = ASTForAudioClassification.from_pretrained(MODEL_ID).eval()
+                self._extractor = from_pretrained(ASTFeatureExtractor, MODEL_ID)
+                self._model = from_pretrained(ASTForAudioClassification, MODEL_ID).eval()
                 self._model.to(self._device)
             except Exception as exc:  # noqa: BLE001
                 raise ProviderError(f"could not load sound-tag model {MODEL_ID}: {exc}") from exc

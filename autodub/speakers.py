@@ -153,13 +153,6 @@ def assign_voices(speakers: list[Speaker], pool: dict[str, list[str]],
 # The models
 # --------------------------------------------------------------------------
 
-def _quiet_transformers():
-    from transformers.utils import logging as hf_logging
-
-    hf_logging.set_verbosity_error()
-    hf_logging.disable_progress_bar()
-
-
 class SpeakerEmbedder:
     """WavLM x-vectors for clips of 16 kHz mono audio."""
 
@@ -179,12 +172,13 @@ class SpeakerEmbedder:
                 "(pip install -r requirements.txt)") from exc
         import warnings
 
-        _quiet_transformers()
+        from .hf import from_pretrained
+
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                self._extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID)
-                self._model = WavLMForXVector.from_pretrained(MODEL_ID).eval()
+                self._extractor = from_pretrained(AutoFeatureExtractor, MODEL_ID)
+                self._model = from_pretrained(WavLMForXVector, MODEL_ID).eval()
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(f"could not load the speaker model {MODEL_ID!r}: {exc}") from exc
 

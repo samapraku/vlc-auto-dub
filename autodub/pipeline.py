@@ -12,7 +12,7 @@ import os
 import shutil
 import tempfile
 
-from . import embedded_subs, media
+from . import embedded_subs, hf, media
 from .config import Config
 from .progress import progress
 from .errors import AutoDubError, InputError, MediaError, ProviderError
@@ -153,6 +153,7 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
 
     media.require_binary("ffmpeg")
     media.require_binary("ffprobe")
+    hf.quiet()
     if not media.has_audio_stream(input_path):
         raise InputError(f"input has no audio stream: {input_path}")
     has_video = media.has_video_stream(input_path)
