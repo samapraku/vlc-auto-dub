@@ -88,6 +88,9 @@ python main.py movie.mkv --in-place --target-lang tr --use-embedded-subs
 # Voice-over: keep the original voices audible under the dub
 python main.py movie.mkv --in-place --target-lang tr --original-volume 0.3
 
+# A different voice for each speaker, male or female to match
+python main.py movie.mkv --in-place --target-lang en --speaker-voices
+
 # Choose providers / voice explicitly
 python main.py v.mp4 --output-base v --stt whisper --translate argos \
     --tts piper --voice en_US-lessac-medium
@@ -112,6 +115,7 @@ python main.py v.mp4 --output-base v --stt whisper --translate argos \
 | `--subtitle-only` | subtitles only, no dub | off |
 | `--original-volume` | keep the original speech under the dub at this gain, 0–1 (voice-over) | `0` (dub replaces it) |
 | `--dub-volume` | dub loudness as a linear gain, 0–3 | `1.0` |
+| `--speaker-voices` | a different voice for each speaker (piper only; see below) | off |
 | `--use-embedded-subs` | dub from a text subtitle track in the file instead of transcribing (see below) | off |
 | `--dub-only` | dub only, no subtitles | off |
 | `--keep-workdir` | keep intermediates at `BASE.work` | off |
@@ -174,6 +178,40 @@ softer, `1.5` louder).
 - Both also read from the config file (`original_volume`, `dub_volume`) and the
   environment (`AUTODUB_ORIGINAL_VOLUME`, `AUTODUB_DUB_VOLUME`).
 - VLC plays one audio track at a time, so the mix is baked into the dub track.
+
+### A voice for each speaker: `--speaker-voices`
+
+With one voice for everyone, a conversation is hard to follow. With
+`--speaker-voices` the speakers are told apart and each one gets a voice of
+their own:
+
+1. Every line of a second or more gets a voiceprint from the original audio
+   (Microsoft's [WavLM speaker model](https://huggingface.co/microsoft/wavlm-base-plus-sv),
+   ~400 MB one-time download, licence CC-BY-SA 3.0). Lines with close
+   voiceprints are grouped into speakers; groups of one or two lines join the
+   nearest speaker, and shorter lines are matched afterwards. At most 8.
+2. A speaker is called male or female only when the AudioSet classifier used
+   for sound tags is clear about it over all their lines together. Otherwise
+   the gender is left unknown.
+3. The speaker with the most dialogue picks first. Each takes an unused voice of
+   their gender; speakers of unknown gender alternate between male and female
+   voices. No two speakers share a voice until the pool runs out.
+
+English uses the 18-speaker CMU ARCTIC piper model (one ~77 MB download, 6 male
+and 6 female voices used). German, French, Spanish, Italian and Russian have
+2–4 voices each; Turkish and Portuguese only have male piper voices, so women
+get one of those (a warning says so). The run prints each speaker with their
+line count, talk time and voice.
+
+- Off by default. Also `speaker_voices = true` in the config file, or
+  `AUTODUB_SPEAKER_VOICES=1`.
+- An explicit `--voice` wins: every speaker uses it.
+- How well it works depends on the audio. On clean dialogue speakers separate
+  well; shouting, people talking over each other and phone recordings split
+  one person into several speakers or merge two, and make gender unclear.
+- Cost: two models run over the dialogue. On an M-series Mac a 4-minute clip
+  with 77 lines took 16 s extra (CPU), so expect several minutes for a feature
+  film.
 
 ### Recognition, timing and sound tags
 
@@ -323,7 +361,8 @@ scripts/make_fixture.sh fixture.mp4 4
   and will make mistakes.
 - **Audio-only input** produces an audio-only output (`<base>_dubbed.wav`); there
   is no video to carry.
-- **Single speaker assumed.** No diarization or per-speaker voice mapping.
+- **One voice for everyone** unless `--speaker-voices` is on; speaker grouping
+  and gender are best-effort (see above).
 - **Translation** only covers language pairs argostranslate ships; an unavailable
   pair is a clear error, and the `http` backend is untested (off by default).
 - **Piper** speaks the mapped voice for the target language; matching the source

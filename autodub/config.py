@@ -44,6 +44,8 @@ class Config:
     original_volume: float = DEFAULT_ORIGINAL_VOLUME
     # Also write <base>.srt when the subtitles are inside the dubbed copy.
     write_srt: bool = True
+    # Give each speaker in the film a voice of their own (piper only).
+    speaker_voices: bool = False
     duration_tolerance: float = DEFAULT_DURATION_TOLERANCE
 
 
@@ -93,6 +95,7 @@ def build_config(
     dub_volume: float | None = None,
     original_volume: float | None = None,
     write_srt: bool | None = None,
+    speaker_voices: bool | None = None,
 ) -> Config:
     data: dict = {}
     if config_path:
@@ -127,4 +130,6 @@ def build_config(
                                 "original volume", 1.0),
         write_srt=str(pick(write_srt, "write_srt", "AUTODUB_WRITE_SRT", True)).lower()
         not in ("0", "false", "no", "off"),
+        speaker_voices=str(pick(speaker_voices, "speaker_voices", "AUTODUB_SPEAKER_VOICES",
+                                False)).lower() in ("1", "true", "yes", "on"),
     )

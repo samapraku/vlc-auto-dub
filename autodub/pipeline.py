@@ -19,7 +19,7 @@ from .errors import AutoDubError, InputError, MediaError, ProviderError
 from .languages import normalize_code, primary_subtag, track_language
 from .providers import make_stt, make_translator, make_tts
 from .subtitles import Cue, write_srt
-from .voices import effective_voice
+from .voices import effective_voice, speaker_pool
 
 
 def _sha256(path: str) -> str:
@@ -120,6 +120,30 @@ def _write_dubbed_copy(input_path: str, dubbed: str, output_media: str, language
             f"could not keep the original tracks in {os.path.basename(output_media)} "
             f"({exc}); it has the video and the dub only{where}")
         media.mux(input_path, dubbed, output_media)
+
+
+def _speaker_voices(audio: str, segments: list, config: Config, voice: str | None,
+                    lang: str, summary: dict) -> list[str] | None:
+    """A voice for each line, one per speaker; None to use ``voice`` throughout."""
+    if config.voice:
+        summary["warnings"].append("a voice was set explicitly, so every speaker uses it")
+        return None
+    pool, warning = speaker_pool(config.tts, lang or None)
+    if warning:
+        summary["warnings"].append(warning)
+    if not pool:
+        return None
+    from .speakers import assign_voices, label_speakers
+
+    progress("telling the speakers apart")
+    ids, speakers = label_speakers(media.read_samples(audio), [(s, e) for s, e, _ in segments])
+    voices = assign_voices(speakers, pool, voice)
+    summary["speakers"] = [
+        {"id": s.id, "gender": s.gender, "gender_score": s.gender_score, "lines": s.lines,
+         "seconds": s.seconds, "voice": voices[s.id]} for s in speakers]
+    progress(f"found {len(speakers)} speaker{'s' if len(speakers) != 1 else ''}: " + ", ".join(
+        f"{s.gender} -> {voices[s.id]}" for s in speakers))
+    return [voices[k] for k in ids]
 
 
 def run(input_path: str, output_base: str | None, config: Config) -> dict:
@@ -330,6 +354,11 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
             return summary
         assert tts is not None  # set whenever we are not in subtitle-only mode
 
+        line_voices = None
+        if config.speaker_voices:
+            line_voices = _speaker_voices(audio, segments, config, voice,
+                                          target_code or source_code, summary)
+
         # Build the dubbed timeline.
         parts: list[str] = []
         cursor = 0.0
@@ -341,7 +370,7 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
             raw = os.path.join(workdir, f"seg_{i}.wav")
             if i % 10 == 0:
                 progress(f"dubbing line {i + 1}/{len(segments)}")
-            tts.synthesize(text, raw, voice)
+            tts.synthesize(text, raw, line_voices[i] if line_voices else voice)
             fitted = os.path.join(workdir, f"fit_{i}.wav")
             media.fit_segment(raw, end - start, fitted)
             if config.original_volume > 0 or config.dub_volume != 1.0:

@@ -71,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-srt", action="store_true",
                         help="don't write <base>.srt when the subtitles are inside the dubbed "
                              "copy (it is still written when they cannot go inside)")
+    parser.add_argument("--speaker-voices", action="store_true",
+                        help="tell the speakers apart and give each a voice of their own, "
+                             "male or female to match (piper only; downloads a ~400 MB "
+                             "speaker model once)")
     parser.add_argument("--keep-workdir", action="store_true",
                         help="keep intermediate files at <output-base>.work")
     parser.add_argument("--config", default=None, help="path to a config file (key = value or JSON)")
@@ -103,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             dub_volume=args.dub_volume,
             original_volume=args.original_volume,
             write_srt=False if args.no_srt else None,
+            speaker_voices=True if args.speaker_voices else None,
         )
         summary = run(args.input, args.output_base, config)
     except AutoDubError as exc:
@@ -118,7 +123,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[autodub] segments: {summary['segment_count']}")
     if summary.get("sound_tags"):
         print(f"[autodub] sound tags: {summary['sound_tags']}")
-    print(f"[autodub] voice: {summary.get('voice') or '(provider default)'}")
+    if summary.get("speakers"):
+        print(f"[autodub] speakers: {len(summary['speakers'])}")
+        for spk in summary["speakers"]:
+            print(f"[autodub]   #{spk['id'] + 1} {spk['gender']}, "
+                  f"{spk['lines']} lines, {spk['seconds']:g}s -> {spk['voice']}")
+    else:
+        print(f"[autodub] voice: {summary.get('voice') or '(provider default)'}")
     if summary["mode"] == "full" and (summary["original_volume"] or summary["dub_volume"] != 1.0):
         print(f"[autodub] mix: dub {summary['dub_volume']:g}x, "
               f"original speech under it {summary['original_volume']:g}x")
