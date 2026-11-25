@@ -128,7 +128,8 @@ def build_config(
         original_volume=_volume(pick(original_volume, "original_volume",
                                      "AUTODUB_ORIGINAL_VOLUME", DEFAULT_ORIGINAL_VOLUME),
                                 "original volume", 1.0),
-        write_srt=str(pick(write_srt, "write_srt", "AUTODUB_WRITE_SRT", True)).lower()
+        # Empty means unset, i.e. the default (on).
+        write_srt=str(pick(write_srt, "write_srt", "AUTODUB_WRITE_SRT", True)).strip().lower()
         not in ("0", "false", "no", "off"),
         speaker_voices=str(pick(speaker_voices, "speaker_voices", "AUTODUB_SPEAKER_VOICES",
                                 False)).lower() in ("1", "true", "yes", "on"),

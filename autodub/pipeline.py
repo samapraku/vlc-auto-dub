@@ -15,7 +15,7 @@ import tempfile
 from . import embedded_subs, hf, media
 from .config import Config
 from .progress import progress
-from .errors import AutoDubError, InputError, MediaError, ProviderError
+from .errors import AutoDubError, ContainerError, InputError, MediaError, ProviderError
 from .languages import normalize_code, primary_subtag, track_language
 from .providers import make_stt, make_translator, make_tts
 from .subtitles import Cue, write_srt
@@ -40,7 +40,8 @@ def _resolve_outputs(input_path: str, output_base: str, has_video: bool) -> tupl
 
 
 def _replace_in_place(input_path: str, audio: str | None, srt: str | None, language: str,
-                      subtitle_codec: str, input_hash: str, workdir: str) -> None:
+                      subtitle_codec: str, input_hash: str, workdir: str,
+                      replace_und: bool = False) -> None:
     """Add the tracks to ``input_path`` atomically.
 
     The new file is written next to the original (same filesystem, so the final
@@ -54,8 +55,13 @@ def _replace_in_place(input_path: str, audio: str | None, srt: str | None, langu
     os.close(fd)
     try:
         expected = media.mux_tracks(input_path, tmp, audio=audio, srt=srt,
-                                    language=language, subtitle_codec=subtitle_codec)
-        _verify_rewrite(input_path, tmp, expected, language, audio is not None, srt is not None)
+                                    language=language, subtitle_codec=subtitle_codec,
+                                    replace_und=replace_und)
+        try:
+            _verify_rewrite(input_path, tmp, expected, language,
+                            audio is not None, srt is not None)
+        except MediaError as exc:
+            raise MediaError(f"{exc}; the original was left untouched") from exc
         if _sha256(input_path) != input_hash:
             raise MediaError("input file changed during processing; not replacing it")
         shutil.copymode(input_path, tmp)
@@ -66,30 +72,66 @@ def _replace_in_place(input_path: str, audio: str | None, srt: str | None, langu
 
 
 def _verify_rewrite(original: str, rewritten: str, expected: dict, language: str,
-                    added_audio: bool, added_subs: bool) -> None:
+                    added_audio: bool, added_subs: bool, *, ignore_data: bool = False) -> None:
+    """Check the new file. ``ignore_data``: the muxer may recreate data streams
+    (chapters, timecodes) that were left out, so don't count those."""
     streams = media.probe_streams(rewritten)
     counts: dict[str, int] = {}
     for s in streams:
         kind = s.get("codec_type", "")
-        counts[kind] = counts.get(kind, 0) + 1
+        if not (ignore_data and kind == "data"):
+            counts[kind] = counts.get(kind, 0) + 1
     if counts != expected:
-        raise MediaError(f"rewritten file has streams {counts}, expected {expected}; "
-                         f"the original was left untouched")
+        raise MediaError(f"the new file has streams {counts}, expected {expected}")
     ours = [s for s in streams if media.is_autodub_stream(s)
             and media.stream_language(s) == language]
     want = ({"subtitle"} if added_subs else set()) | ({"audio"} if added_audio else set())
     if {s.get("codec_type") for s in ours} != want:
-        raise MediaError("rewritten file is missing the labelled AutoDub tracks; "
-                         "the original was left untouched")
+        raise MediaError("the new file is missing the labelled AutoDub tracks")
     if abs(media.duration(rewritten) - media.duration(original)) > 1.0:
-        raise MediaError("rewritten file duration differs from the original; "
-                         "the original was left untouched")
+        raise MediaError("the new file's duration differs from the original's")
+
+
+def _mux_copy(input_path: str, out: str, dubbed: str, language: str, srt: str | None,
+              subtitle_codec: str | None, replace_und: bool) -> bool:
+    """Mux every original track plus ours into ``out`` and verify it.
+
+    If the container rejects that and there are data streams (an MP4 cannot
+    carry every timecode or phone sensor track), retry without them. Returns
+    whether they were left out.
+    """
+    has_data = any(s.get("codec_type") == "data" for s in media.probe_streams(input_path))
+
+    def attempt(keep_data: bool) -> None:
+        expected = media.mux_tracks(
+            input_path, out, audio=dubbed, srt=srt, language=language,
+            subtitle_codec=subtitle_codec or "", subtitle_default=True,
+            replace_und=replace_und, keep_data=keep_data)
+        _verify_rewrite(input_path, out, expected, language, True, srt is not None,
+                        ignore_data=not keep_data)
+
+    try:
+        try:
+            attempt(True)
+            return False
+        except ContainerError:
+            if not has_data:
+                raise
+        attempt(False)
+        return True
+    except MediaError as exc:
+        # Containers --in-place does not support fail in ways of their own, or
+        # drop titles, languages or streams without an error. In the supported
+        # ones, anything but a ContainerError is a bug.
+        if os.path.splitext(out)[1].lower() not in media.IN_PLACE_SUBTITLE_CODEC:
+            raise ContainerError(str(exc)) from exc
+        raise
 
 
 def _write_dubbed_copy(input_path: str, dubbed: str, output_media: str, language: str,
                        summary: dict, *, srt: str | None = None,
                        subtitle_codec: str | None = None,
-                       fallback_srt: str | None = None) -> None:
+                       fallback_srt: str | None = None, replace_und: bool = False) -> None:
     """Write ``<base>_dubbed<ext>``: every original track, the dub, the new subtitles.
 
     Same layout as --in-place (original audio, subtitles, chapters and other
@@ -98,28 +140,101 @@ def _write_dubbed_copy(input_path: str, dubbed: str, output_media: str, language
     the default subtitle track, so the copy plays as dubbed on its own.
     Containers that cannot carry some original track fall back to the video
     plus the dub only, with a warning, rather than failing the run; the new
-    subtitles then go to ``fallback_srt`` so they are not lost.
+    subtitles then go to ``fallback_srt`` so they are not lost. Any other
+    failure is an error. The copy only appears under its name when complete.
     """
+    folder, name = os.path.split(os.path.abspath(output_media))
+    stem, ext = os.path.splitext(name)
+    fd, tmp = tempfile.mkstemp(prefix=f".{stem}.autodub-", suffix=ext, dir=folder)
+    os.close(fd)
     try:
-        expected = media.mux_tracks(input_path, output_media, audio=dubbed, srt=srt,
-                                    language=language, subtitle_codec=subtitle_codec or "",
-                                    subtitle_default=True)
-        _verify_rewrite(input_path, output_media, expected, language, True, srt is not None)
-        summary["kept_original_tracks"] = True
-        summary["subtitles_embedded"] = srt is not None
-    except MediaError as exc:
-        summary["kept_original_tracks"] = False
-        summary["subtitles_embedded"] = False
-        where = ""
-        if srt is not None and fallback_srt:
-            if os.path.abspath(srt) != os.path.abspath(fallback_srt):  # --no-srt
-                shutil.copyfile(srt, fallback_srt)
-            summary["output_srt"] = os.path.abspath(fallback_srt)
-            where = f"; the subtitles are in {os.path.basename(fallback_srt)}"
+        try:
+            left_out_data = _mux_copy(input_path, tmp, dubbed, language, srt,
+                                      subtitle_codec, replace_und)
+            summary["kept_original_tracks"] = True
+            summary["subtitles_embedded"] = srt is not None
+            if left_out_data:
+                summary["warnings"].append(
+                    f"{name} leaves out the original's data tracks (timecode, sensor "
+                    f"data...), which the container cannot carry")
+        except ContainerError as exc:
+            summary["kept_original_tracks"] = False
+            summary["subtitles_embedded"] = False
+            where = ""
+            if srt is not None and fallback_srt:
+                if os.path.abspath(srt) != os.path.abspath(fallback_srt):  # --no-srt
+                    shutil.copyfile(srt, fallback_srt)
+                summary["output_srt"] = os.path.abspath(fallback_srt)
+                where = f"; the subtitles are in {os.path.basename(fallback_srt)}"
+            summary["warnings"].append(
+                f"could not keep the original tracks in {name} "
+                f"({exc}); it has the video and the dub only{where}")
+            media.mux(input_path, dubbed, tmp)
+        shutil.copymode(input_path, tmp)
+        os.replace(tmp, output_media)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    if (summary["subtitles_embedded"] and not summary["output_srt"]
+            and fallback_srt and os.path.exists(fallback_srt)):
         summary["warnings"].append(
-            f"could not keep the original tracks in {os.path.basename(output_media)} "
-            f"({exc}); it has the video and the dub only{where}")
-        media.mux(input_path, dubbed, output_media)
+            f"{os.path.basename(fallback_srt)} was already there and is not from this run")
+
+
+def _spoken_language(stt, input_path: str, audio_index: int | None) -> str | None:
+    """Detect the spoken language from three short samples, or ``None``.
+
+    Samples from inside the film: the opening is often music or silence. Any
+    failure, in the sampling as much as in the detection, means ``None``, so the
+    caller transcribes the audio as usual.
+    """
+    detect = getattr(stt, "detect_language", None)
+    if detect is None:
+        return None
+    progress("detecting the spoken language")
+    try:
+        total = media.duration(input_path)
+        with tempfile.TemporaryDirectory(prefix="autodub-") as tmp:
+            samples = []
+            for i, part in enumerate((0.25, 0.5, 0.75) if total > 120 else (0.0,)):
+                path = os.path.join(tmp, f"sample_{i}.wav")
+                media.extract_audio(input_path, path, audio_index=audio_index,
+                                    start=total * part, length=30.0)
+                samples.append(path)
+            detected = detect(samples)
+    except AutoDubError as exc:
+        progress(str(exc))
+        return None
+    return primary_subtag(detected) if detected else None
+
+
+def _choose_embedded(stt, input_path: str, audio_index: int | None, source_code: str,
+                     target_code: str):
+    """``(track, None)``, or ``(None, why not)`` when the audio must be transcribed."""
+    streams = media.probe_streams(input_path)
+    usable = [track for _s, track in embedded_subs.usable_tracks(streams)]
+    instead = "transcribed the audio instead"
+    if not usable:
+        return None, f"no text subtitle track in the file; {instead}"
+    track = embedded_subs.find_track(streams, source_code, target_code)
+    if track is not None:
+        return track, None
+    if not source_code:
+        tagged = [t for t in usable if t.language]
+        if not tagged:
+            return None, (f"subtitle track #{usable[0].index} has no language tag; set the "
+                          f"spoken language to use it; {instead}")
+        source_code = _spoken_language(stt, input_path, audio_index) or ""
+        if not source_code:
+            return None, (f"could not tell which subtitle track is in the spoken language; "
+                          f"set the spoken language to use one; {instead}")
+        # Only what the user says vouches for an untagged track.
+        track = embedded_subs.find_track(streams, source_code, None, allow_untagged=False)
+        if track is not None:
+            return track, None
+    return None, (f"no text subtitle track in the spoken language ({source_code})"
+                  + (f" or in {target_code}" if target_code and target_code != source_code else "")
+                  + f"; {instead}")
 
 
 def _speaker_voices(audio: str, segments: list, config: Config, voice: str | None,
@@ -159,7 +274,10 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
     has_video = media.has_video_stream(input_path)
 
     subtitle_codec = None
-    audio_index = None
+    # Transcribe the original speech, never an AutoDub track from an earlier run.
+    audio_streams = [s for s in media.probe_streams(input_path) if s.get("codec_type") == "audio"]
+    originals = [i for i, s in enumerate(audio_streams) if not media.is_autodub_stream(s)]
+    audio_index = originals[0] if originals else None
     if config.in_place:
         ext = os.path.splitext(input_path)[1].lower()
         subtitle_codec = media.IN_PLACE_SUBTITLE_CODEC.get(ext)
@@ -168,10 +286,6 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
             raise InputError(f"--in-place supports {supported} files, not {ext or 'no extension'!r}")
         if not os.access(os.path.dirname(os.path.abspath(input_path)), os.W_OK):
             raise InputError(f"--in-place needs write access to the folder of {input_path}")
-        # Transcribe the original speech, never an AutoDub track from an earlier run.
-        audio_streams = [s for s in media.probe_streams(input_path) if s.get("codec_type") == "audio"]
-        originals = [i for i, s in enumerate(audio_streams) if not media.is_autodub_stream(s)]
-        audio_index = originals[0] if originals else None
         output_media, output_srt = os.path.abspath(input_path), None
     else:
         if not output_base:
@@ -216,20 +330,17 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
     user_source = (source_lang, source_code, do_translate)
     embedded = None
     embedded_warning = None
+    not_spoken = False
     if config.use_embedded_subs:
-        embedded = embedded_subs.find_track(media.probe_streams(input_path),
-                                            source_code or None, target_code or None)
-        if embedded is None:
-            embedded_warning = "no text subtitle track in the file; transcribed the audio instead"
-        elif embedded.language is None and target_code and not source_code:
-            embedded_warning = (f"subtitle track #{embedded.index} has no language tag, so the "
-                                f"language to translate from is unknown; set the spoken language "
-                                f"to use it. Transcribed the audio instead")
-            embedded = None
-        elif embedded.language:
+        embedded, embedded_warning = _choose_embedded(stt, input_path, audio_index,
+                                                      source_code, target_code)
+        if embedded is not None and embedded.language:
             # The dub is made from the track's text, so translate from its language.
             source_code = source_lang = embedded.language
             do_translate = bool(target_code and source_code != target_code)
+            # A track already in the target language may not be what is spoken.
+            not_spoken = bool(target_code and source_code == target_code
+                              and user_source[1] != target_code)
 
     # TTS voice follows the target language (falling back to the source language,
     # then to the provider default); an explicit --voice always wins.
@@ -267,15 +378,20 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
         if embedded is not None:
             progress(f"reading subtitle track #{embedded.index} "
                      f"({embedded.language or 'no language tag'}) instead of transcribing")
-            raw_segments = embedded_subs.extract_segments(input_path, embedded, workdir)
+            problem = "has no usable text"
+            try:
+                raw_segments = embedded_subs.extract_segments(input_path, embedded, workdir)
+            except MediaError as exc:
+                problem = f"could not be read ({exc})"
             if raw_segments:
                 summary["providers"]["stt"] = f"embedded subtitles (track #{embedded.index})"
                 summary["subtitle_track"] = embedded.index
                 progress(f"read {len(raw_segments)} lines from the subtitle track")
             else:
-                summary["warnings"].append(f"subtitle track #{embedded.index} has no usable "
-                                           f"text; transcribed the audio instead")
+                summary["warnings"].append(f"subtitle track #{embedded.index} {problem}; "
+                                           f"transcribed the audio instead")
                 source_lang, source_code, do_translate = user_source
+                not_spoken = False
                 raw_segments = None
         if raw_segments is None:
             progress(f"transcribing ({config.stt}"
@@ -350,7 +466,8 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
         if config.subtitle_only:
             if config.in_place:
                 _replace_in_place(input_path, None, srt_path, language, subtitle_codec,
-                                  input_hash_before, workdir)
+                                  input_hash_before, workdir,
+                                  replace_und=not do_translate and not not_spoken)
             summary["mode"] = "subtitle-only"
             return summary
         assert tts is not None  # set whenever we are not in subtitle-only mode
@@ -408,7 +525,8 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
 
         if config.in_place:
             _replace_in_place(input_path, dubbed, srt_path, language, subtitle_codec,
-                              input_hash_before, workdir)
+                              input_hash_before, workdir,
+                                  replace_und=not do_translate and not not_spoken)
             summary["dubbed_duration"] = round(dubbed_dur, 3)
             summary["source_duration"] = round(source_dur, 3)
             summary["mode"] = "full"
@@ -417,7 +535,8 @@ def run(input_path: str, output_base: str | None, config: Config) -> dict:
             _write_dubbed_copy(input_path, dubbed, output_media, language, summary,
                                srt=srt_path if copy_subtitle_codec else None,
                                subtitle_codec=copy_subtitle_codec,
-                               fallback_srt=fallback_srt)
+                               fallback_srt=fallback_srt,
+                               replace_und=not do_translate and not not_spoken)
         else:
             # audio-only input has no video stream to copy; keep the dubbed audio
             shutil.copyfile(dubbed, output_media)
